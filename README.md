@@ -60,6 +60,14 @@ Cache files live in `agent-shell-fork-tree-cache-directory` (default `~/.emacs.d
 
 Completed turns from a cancelled replay can advance an in-memory/disk checkpoint; the last unfinished replay turn does not. A successful full rebuild replaces the cache only after every read completes, and carries labels across equivalent paths.
 
+## Rebuild performance
+
+Redraws are content-driven, not timer-driven. Progress messages update the header only. The tree updates when related endpoints, titles or coverage change; timestamps, reassigned message IDs and unrelated histories do not trigger redraws. Changed rows are reconciled by node/session identity without clearing the buffer. The selected endpoint and window's top row are preserved, and unchanged previews are not rewritten or reinitialized.
+
+Incremental discovery saves the entire cache every `agent-shell-fork-tree-checkpoint-batch-size` history reads (default 16), then flushes pending changes on completion, cancellation or failure. In-memory checkpoints advance on each committed replay. An abrupt Emacs/process crash can lose the unsaved batch; set the batch size to 1 for per-history disk durability. An unchanged scan performs no disk writes. Full rebuilds still save only after success.
+
+See [PERFORMANCE.md](PERFORMANCE.md) for reproducible baseline and leave-one-out ablation experiments, raw measurements, and backend/GUI measurement limitations.
+
 ## Failure and cleanup
 
 Incremental failure reports its reason and asks once whether to perform a full rebuild. Declining retains the existing tree. Full rebuild failure also retains the old cache and does not recursively prompt or retry.

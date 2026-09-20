@@ -8,7 +8,8 @@
           (store (agent-shell-fork-tree--new-store "fixture" "/tmp"))
           (agent-shell-fork-tree-cache-directory nil)
           requests pending cancel result finished callback client worker
-          (caps '((loadSession . t) (sessionCapabilities (list) (fork) (delete)))))
+          (caps '((loadSession . t) (sessionCapabilities (list) (fork) (delete))))
+          (rows [((sessionId . "main") (title . "Main") (updatedAt . "1"))]))
      (unwind-protect
          (cl-letf (((symbol-function 'acp-subscribe-to-notifications)
                     (lambda (&rest args) (setq callback (plist-get args :on-notification))))
@@ -21,7 +22,7 @@
                       (with-current-buffer worker
                         (pcase (map-elt (plist-get args :request) :method)
                           ("initialize" (funcall (plist-get args :on-success) `((agentCapabilities . ,caps))))
-                          ("session/list" (funcall (plist-get args :on-success) '((sessions . [((sessionId . "main") (title . "Main") (updatedAt . "1"))]))))
+                          ("session/list" (funcall (plist-get args :on-success) `((sessions . ,rows))))
                           ("session/delete" (funcall (plist-get args :on-success) nil))
                           (_ (setq pending args)))))))
            (with-current-buffer source
@@ -107,6 +108,104 @@
     (aft-test-add store "main" '("one") "2" "new-")
     (cl-letf (((symbol-function 'agent-shell-fork-tree--fingerprint) (lambda (&rest _) (ert-fail "Rehashed refreshed checkpoint"))))
       (aft-test-add store "main" '("one") "3" "new-"))))
+
+(ert-deftest aft-test-checkpoints-batch-and-flush-at-completion ()
+  (aft-test-transport
+    (setq rows [((sessionId . "main") (updatedAt . "1"))
+                ((sessionId . "branch") (updatedAt . "1"))])
+    (let ((agent-shell-fork-tree-checkpoint-batch-size 16) (writes 0))
+      (cl-letf (((symbol-function 'agent-shell-fork-tree--save)
+                 (lambda (_) (cl-incf writes))))
+        (start)
+        (reply '((sessionId . "snapshot")))
+        (updates (aft-test-updates '("one")))
+        (reply nil)
+        (should (= 0 writes))
+        (should (gethash "main" (agent-shell-fork-tree--store-sessions store)))
+        (reply '((sessionId . "snapshot")))
+        (updates (aft-test-updates '("one" "two")))
+        (reply nil)
+        (should finished)
+        (should (= 1 writes))))))
+
+(ert-deftest aft-test-checkpoints-flush-on-cancel-and-failure ()
+  (dolist (failure '(nil t))
+    (aft-test-transport
+      (let* ((agent-shell-fork-tree-cache-directory (make-temp-file "aft-flush-" t))
+             (agent-shell-fork-tree-checkpoint-batch-size 16))
+        (unwind-protect
+            (progn
+              (start)
+              (reply '((sessionId . "snapshot")))
+              (updates (aft-test-updates '("one" "unfinished")))
+              (if failure (reply '((message . "Rejected")) t)
+                (funcall cancel)
+                (reply nil))
+              (should finished)
+              (let ((fresh (agent-shell-fork-tree--load "fixture" "/tmp")))
+                (should (equal '(1) (aft-test-path fresh "main")))
+                (should (agent-shell-fork-tree--session-dirty
+                         (gethash "main" (agent-shell-fork-tree--store-sessions fresh))))))
+          (delete-directory agent-shell-fork-tree-cache-directory t))))))
+
+(ert-deftest aft-test-checkpoint-cached-metadata ()
+  (aft-test-transport
+    (setq rows [((sessionId . "main") (title . "Renamed") (updatedAt . "1"))])
+    (aft-test-add store "main" '("one"))
+    (aft-test-add store "deleted" '("one"))
+    (let ((writes 0) (revision (agent-shell-fork-tree--store-revision store)))
+      (cl-letf (((symbol-function 'agent-shell-fork-tree--save)
+                 (lambda (_) (cl-incf writes))))
+        (start)
+        (should finished)
+        (should (= 1 writes))
+        (should (> (agent-shell-fork-tree--store-revision store) revision))
+        (should (equal "Renamed" (agent-shell-fork-tree--session-title
+                                 (gethash "main" (agent-shell-fork-tree--store-sessions store)))))
+        (should-not (gethash "deleted" (agent-shell-fork-tree--store-sessions store)))
+        (should-not (seq-find (lambda (r) (equal "session/load" (map-elt r :method))) requests))))))
+
+(ert-deftest aft-test-checkpoint-one-saves-every-read ()
+  (aft-test-transport
+    (setq rows [((sessionId . "main") (updatedAt . "1"))
+                ((sessionId . "branch") (updatedAt . "1"))])
+    (let ((agent-shell-fork-tree-checkpoint-batch-size 1) (writes 0))
+      (cl-letf (((symbol-function 'agent-shell-fork-tree--save)
+                 (lambda (_) (cl-incf writes))))
+        (start)
+        (reply '((sessionId . "snapshot")))
+        (updates (aft-test-updates '("one")))
+        (reply nil)
+        (should (= 1 writes))
+        (reply '((sessionId . "snapshot")))
+        (updates (aft-test-updates '("one" "two")))
+        (reply nil)
+        (should finished)
+        (should (= 2 writes))))))
+
+(ert-deftest aft-test-cached-scan-does-not-write-or-load ()
+  (aft-test-transport
+    (aft-test-add store "main" '("one"))
+    (setf (agent-shell-fork-tree--session-title
+           (gethash "main" (agent-shell-fork-tree--store-sessions store))) "Main")
+    (cl-letf (((symbol-function 'agent-shell-fork-tree--save)
+               (lambda (_) (ert-fail "Unchanged cache was written"))))
+      (start)
+      (should finished)
+      (should-not (seq-find (lambda (r) (equal "session/load" (map-elt r :method))) requests)))))
+
+(ert-deftest aft-test-checkpoint-write-failure-still-cleans-up ()
+  (aft-test-transport
+    (cl-letf (((symbol-function 'agent-shell-fork-tree--save)
+               (lambda (_) (error "Disk full"))))
+      (start)
+      (reply '((sessionId . "snapshot")))
+      (updates (aft-test-updates '("one")))
+      (reply nil)
+      (should finished)
+      (should (string-match-p "Disk full" (car result)))
+      (should-not (buffer-live-p worker))
+      (should (gethash "main" (agent-shell-fork-tree--store-sessions store))))))
 
 (ert-deftest aft-test-auto-events-only-schedule-visible-related-trees ()
   (let* ((source (generate-new-buffer " *aft-auto-source*"))

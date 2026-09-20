@@ -17,6 +17,7 @@
 (defun aft-test-workflow (profile)
   (let* ((directory (directory-file-name (file-truename (make-temp-file "aft-acp-" t))))
          (default-directory (file-name-as-directory directory))
+         (shell-maker-root-path directory)
          (agent-shell-fork-tree-cache-directory (expand-file-name "cache" directory))
          (agent-shell-fork-tree--stores (make-hash-table :test #'equal))
          (agent-shell-fork-tree-auto-rebuild nil)

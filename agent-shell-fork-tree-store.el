@@ -19,7 +19,7 @@
 (cl-defstruct (agent-shell-fork-tree--session (:constructor agent-shell-fork-tree--session-create))
   id title updated path coverage dirty)
 (cl-defstruct (agent-shell-fork-tree--store (:constructor agent-shell-fork-tree--store-create))
-  key cwd agent nodes sessions by-id by-text (next 1))
+  key cwd agent nodes sessions by-id by-text (next 1) (revision 0))
 
 (defun agent-shell-fork-tree--new-store (agent cwd)
   "Make an empty index for AGENT and CWD."
@@ -171,7 +171,8 @@ COMPLETE means load finished; FOCUS limits indexing of unrelated sessions
             (agent-shell-fork-tree--session-title session) (or (map-elt info 'title) id)
             (agent-shell-fork-tree--session-dirty session) (not complete))
       (when complete (setf (agent-shell-fork-tree--session-updated session) (map-elt info 'updatedAt)))
-      (puthash id session (agent-shell-fork-tree--store-sessions store)))
+      (puthash id session (agent-shell-fork-tree--store-sessions store))
+      (cl-incf (agent-shell-fork-tree--store-revision store)))
     session))
 
 (defun agent-shell-fork-tree--needs-read (store info focus force)

@@ -8,6 +8,13 @@
   "Maximum seconds for each discovery or history request."
   :type 'number :group 'agent-shell-fork-tree)
 
+(defcustom agent-shell-fork-tree-checkpoint-batch-size 16
+  "Number of history reads between disk checkpoints during discovery.
+Completed turns are indexed in memory immediately.  Completion, cancellation
+and failure flush pending changes regardless of this limit.  One saves after
+every history read."
+  :type 'integer :group 'agent-shell-fork-tree)
+
 (defun agent-shell-fork-tree--scan (source store focus full progress finish)
   "Read SOURCE's project into STORE for FOCUS, returning a cancel function.
 FULL bypasses timestamp caches.  PROGRESS receives STORE and a message.
@@ -16,14 +23,21 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
          (cwd (agent-shell-fork-tree--store-cwd store))
          (worker (generate-new-buffer " *Fork tree ACP*"))
          client caps timer listed queue row snapshot reading updates stage
-         finished cancelled (done 0))
+         finished cancelled dirty (pending-saves 0) (done 0))
     (with-current-buffer worker
       (setq default-directory (buffer-local-value 'default-directory source)
             client (funcall (map-elt config :client-maker) worker)))
     (cl-labels
         ((publish (message) (funcall progress store message))
+         (checkpoint (&optional force)
+           (when (and (not full) dirty
+                      (or force (>= pending-saves agent-shell-fork-tree-checkpoint-batch-size)))
+             (agent-shell-fork-tree--save store)
+             (setq dirty nil pending-saves 0)))
          (close (error-text)
            (when timer (cancel-timer timer))
+           (condition-case error (checkpoint t)
+             (error (setq error-text (error-message-string error))))
            (acp-shutdown :client client)
            (kill-buffer worker)
            (funcall finish store error-text cancelled))
@@ -59,7 +73,9 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
              (agent-shell-fork-tree--ingest store row
                                            (agent-shell-fork-tree--turns (reverse updates) complete)
                                            complete focus)
-             (unless full (agent-shell-fork-tree--save store))))
+             (setq dirty t)
+             (cl-incf pending-saves)
+             (checkpoint)))
          (stop (error-text)
            (unless finished
              ;; A cancelled replay can still contain whole, completed older turns.
@@ -99,16 +115,24 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
                        (not (agent-shell-fork-tree--needs-read store (car queue) focus full)))
              (let* ((info (pop queue))
                     (old (gethash (map-elt info 'sessionId) (agent-shell-fork-tree--store-sessions store))))
-               (setf (agent-shell-fork-tree--session-title old) (or (map-elt info 'title) (map-elt info 'sessionId)))
+               (let ((title (or (map-elt info 'title) (map-elt info 'sessionId))))
+                 (unless (equal title (agent-shell-fork-tree--session-title old))
+                   (setf (agent-shell-fork-tree--session-title old) title)
+                   (setq dirty t)
+                   (cl-incf (agent-shell-fork-tree--store-revision store))))
                (cl-incf done)))
            (cond
             (cancelled (stop nil))
             ((null queue)
              ;; Reconcile only after a successful complete scan, so cancellation
              ;; cannot remove endpoints that have not yet been discovered.
-             (let ((known (mapcar (lambda (s) (map-elt s 'sessionId)) listed)))
+             (let ((known (make-hash-table :test #'equal)))
+               (dolist (info listed) (puthash (map-elt info 'sessionId) t known))
                (dolist (id (hash-table-keys (agent-shell-fork-tree--store-sessions store)))
-                 (unless (member id known) (remhash id (agent-shell-fork-tree--store-sessions store)))))
+                 (unless (gethash id known)
+                   (remhash id (agent-shell-fork-tree--store-sessions store))
+                   (setq dirty t)
+                   (cl-incf (agent-shell-fork-tree--store-revision store)))))
              (setq finished t)
              (close nil))
             (t
