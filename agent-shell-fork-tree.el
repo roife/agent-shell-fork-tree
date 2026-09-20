@@ -21,6 +21,14 @@
     (side . right) (slot . 1) (window-width . 0.45))
   "Where to show the selected turn's preview."
   :type 'sexp :group 'agent-shell-fork-tree)
+(defcustom agent-shell-fork-tree-message-truncation 80
+  "Maximum display width of conversation text in a tree row.
+When non-nil, longer prompts are shortened with an ellipsis.  This only
+affects tree rows; search and previews keep the complete conversation text.
+Custom node labels are always shown in full."
+  :type '(choice (const :tag "Do not truncate" nil)
+                 (natnum :tag "Display columns"))
+  :group 'agent-shell-fork-tree)
 
 (defvar agent-shell-fork-tree--stores (make-hash-table :test #'equal))
 (defvar-local agent-shell-fork-tree--store nil)
@@ -88,6 +96,7 @@
 SESSIONS, when supplied, is the sorted list of related sessions.  Paths within
 a store are append-only, so the endpoint identifies the displayed path."
   (list agent-shell-fork-tree--store agent-shell-fork-tree--focus
+        agent-shell-fork-tree-message-truncation
         (mapcar (lambda (session)
                   (list (agent-shell-fork-tree--session-id session)
                         (agent-shell-fork-tree--session-title session)
@@ -159,6 +168,16 @@ other rows are deleted and reinserted; the renderer restores window anchors."
           (insert text))))
     (delete-region (point) (point-max))))
 
+(defun agent-shell-fork-tree--node-text (node)
+  "Return NODE's single-line text for display in the tree."
+  (let* ((label (agent-shell-fork-tree--node-label node))
+         (text (replace-regexp-in-string
+                "[\n\r]+" " " (or label (agent-shell-fork-tree--node-prompt node) ""))))
+    (if (or label (null agent-shell-fork-tree-message-truncation))
+        text
+      (truncate-string-to-width
+       text agent-shell-fork-tree-message-truncation nil nil "…"))))
+
 (defun agent-shell-fork-tree--render ()
   "Draw the current conversation, preserving its endpoint and window positions."
   (let* ((view (current-buffer)) (store agent-shell-fork-tree--store)
@@ -203,7 +222,7 @@ other rows are deleted and reinserted; the renderer restores window anchors."
                        (start (point)))
             (insert prefix edge (if (gethash id active) "● " "○ ")
                     (propertize (format "%03d  " id) 'face 'shadow)
-                    (replace-regexp-in-string "[\n\r]+" " " (or (agent-shell-fork-tree--node-label node) (agent-shell-fork-tree--node-prompt node))) "\n")
+                    (agent-shell-fork-tree--node-text node) "\n")
             (add-text-properties start (point) (list 'fork-tree-node id))
             (puthash (cons id nil) start positions)
             (when (and (null selected-session) (= id selected)) (setq position start))

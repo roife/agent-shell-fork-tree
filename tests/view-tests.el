@@ -21,6 +21,19 @@
            (when (buffer-live-p preview) (kill-buffer preview)))
          (kill-buffer view)))))
 
+(ert-deftest aft-test-tree-message-truncation ()
+  (let ((node (agent-shell-fork-tree--node-create
+               :id 1 :prompt "abcdefghijk\nsecond line")))
+    (let ((agent-shell-fork-tree-message-truncation 8))
+      (should (equal "abcdefg…" (agent-shell-fork-tree--node-text node)))
+      (setf (agent-shell-fork-tree--node-label node) "A deliberately long label")
+      (should (equal "A deliberately long label"
+                     (agent-shell-fork-tree--node-text node))))
+    (setf (agent-shell-fork-tree--node-label node) nil)
+    (let ((agent-shell-fork-tree-message-truncation nil))
+      (should (equal "abcdefghijk second line"
+                     (agent-shell-fork-tree--node-text node))))))
+
 (ert-deftest aft-test-progress-does-not-rewrite-unchanged-buffers ()
   (aft-test-view
    (let ((tick (buffer-modified-tick))

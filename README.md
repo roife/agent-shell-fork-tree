@@ -20,7 +20,8 @@ The package uses generic ACP `session/list`, `session/load` and native `session/
   :hook (agent-shell-mode . agent-shell-fork-tree-mode)
   :bind ("C-c g t" . agent-shell-fork-tree)
   :custom
-  (agent-shell-fork-tree-auto-rebuild nil))
+  (agent-shell-fork-tree-auto-rebuild nil)
+  (agent-shell-fork-tree-message-truncation 80))
 ```
 
 With straight.el managing packages by default, also add `:straight nil` to this declaration.
@@ -45,6 +46,8 @@ Open an agent-shell conversation and run `M-x agent-shell-fork-tree`. Automatic 
 | `q` | Close the tree and preview |
 
 Each native session has its own `↳` row, even when several sessions have identical history. Empty sessions do not relate to one another through an empty prefix. Historical turn rows are previews, not backend checkpoints: arbitrary old turns cannot be restored or forked through generic ACP.
+
+Conversation text in tree rows is truncated to 80 display columns by default. Customize `agent-shell-fork-tree-message-truncation`, or set it to nil to show complete prompts. Search, previews and custom labels always retain their full text.
 
 Automatic mode updates on opening and after a tracked shell finishes a turn or initializes a session while its related tree is visible. It does not poll continuously. Changes made by other clients are discovered on reopening or with `g`.
 
