@@ -7,6 +7,7 @@
   `(let* ((source (generate-new-buffer " *aft-transport-source*"))
           (store (agent-shell-fork-tree--new-store "fixture" "/tmp"))
           (agent-shell-fork-tree-cache-directory nil)
+          (agent-shell-fork-tree-scan-concurrency 1)
           requests pending cancel result finished callback client worker
           (caps '((loadSession . t) (sessionCapabilities (list) (fork) (delete))))
           (rows [((sessionId . "main") (title . "Main") (updatedAt . "1"))]))
@@ -129,6 +130,114 @@
     (reply nil)
     (should finished)
     (should-not (seq-find (lambda (r) (equal "session/fork" (map-elt r :method))) requests))))
+
+(ert-deftest aft-test-parallel-scan-keeps-readers-busy-and-commits-in-order ()
+  (let* ((source (generate-new-buffer " *aft-parallel-source*"))
+         (store (agent-shell-fork-tree--new-store "fixture" "/tmp"))
+         (agent-shell-fork-tree-cache-directory nil)
+         (agent-shell-fork-tree-scan-concurrency 2)
+         (caps '((loadSession . t) (sessionCapabilities (list) (fork) (delete))))
+         (rows [((sessionId . "main") (title . "Main") (updatedAt . "1"))
+                ((sessionId . "branch") (title . "Branch") (updatedAt . "1"))
+                ((sessionId . "third") (title . "Third") (updatedAt . "1"))])
+         (pending (make-hash-table :test #'eq))
+         (callbacks (make-hash-table :test #'eq))
+         clients deleted committed finished result cancel)
+    (cl-labels
+        ((pending-for (method session-id)
+           (seq-find
+            (lambda (args)
+              (let ((request (plist-get args :request)))
+                (and (equal method (map-elt request :method))
+                     (equal session-id
+                            (map-nested-elt request '(:params sessionId))))))
+            (hash-table-values pending)))
+         (reply (args response)
+           (remhash (plist-get args :buffer) pending)
+           (with-current-buffer (plist-get args :buffer)
+             (funcall (plist-get args :on-success) response)))
+         (finish-fork (session-id)
+           (let ((args (pending-for "session/fork" session-id)))
+             (should args)
+             (reply args `((sessionId . ,(concat "snapshot-" session-id))))))
+         (finish-load (session-id word)
+           (let* ((snapshot (concat "snapshot-" session-id))
+                  (args (pending-for "session/load" snapshot))
+                  (callback (and args (gethash (plist-get args :buffer) callbacks))))
+             (should args)
+             (should callback)
+             (dolist (update (aft-test-updates (list word) (concat session-id "-")))
+               (funcall callback
+                        `((method . "session/update")
+                          (params (sessionId . ,snapshot) (update . ,update)))))
+             (reply args nil))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'acp-shutdown) #'ignore)
+                    ((symbol-function 'acp-subscribe-to-notifications)
+                     (lambda (&rest args)
+                       (puthash (plist-get args :buffer)
+                                (plist-get args :on-notification) callbacks)))
+                    ((symbol-function 'acp-subscribe-to-errors) #'ignore)
+                    ((symbol-function 'acp-send-request)
+                     (lambda (&rest args)
+                       (let* ((buffer (plist-get args :buffer))
+                              (request (plist-get args :request))
+                              (method (map-elt request :method)))
+                         (pcase method
+                           ("initialize"
+                            (funcall (plist-get args :on-success)
+                                     `((agentCapabilities . ,caps))))
+                           ("session/list"
+                            (funcall (plist-get args :on-success)
+                                     `((sessions . ,rows))))
+                           ("session/delete"
+                            (push (map-nested-elt request '(:params sessionId)) deleted)
+                            (funcall (plist-get args :on-success) nil))
+                           (_ (puthash buffer args pending))))))
+                    ((symbol-function 'agent-shell-fork-tree--ingest)
+                     (let ((original (symbol-function 'agent-shell-fork-tree--ingest)))
+                       (lambda (target info turns complete focus)
+                         (push (map-elt info 'sessionId) committed)
+                         (funcall original target info turns complete focus)))))
+            (with-current-buffer source
+              (setq-local
+               agent-shell--state
+               (agent-shell--make-state
+                :buffer source
+                :agent-config
+                `((:identifier . fixture)
+                  (:client-maker
+                   . ,(lambda (buffer)
+                        (let ((client (acp-make-client :command "fake"
+                                                       :context-buffer buffer)))
+                          (push client clients)
+                          client)))))))
+            (setq cancel
+                  (agent-shell-fork-tree--scan
+                   source store "main" nil #'ignore
+                   (lambda (_store error cancelled)
+                     (setq finished t result (list error cancelled)))))
+            (should (= 2 (length clients)))
+            (finish-fork "main")
+            (finish-fork "branch")
+            (finish-load "branch" "one")
+            (should (pending-for "session/fork" "third"))
+            (should-not committed)
+            (finish-fork "third")
+            (finish-load "third" "one")
+            (should-not committed)
+            (finish-load "main" "one")
+            (should finished)
+            (should (equal '(nil nil) result))
+            (should (equal '("main" "branch" "third") (nreverse committed)))
+            (should (equal '("snapshot-branch" "snapshot-main" "snapshot-third")
+                           (sort deleted #'string<)))
+            (should (= 3 (hash-table-count
+                          (agent-shell-fork-tree--store-sessions store)))))
+        (when (and cancel (not finished)) (funcall cancel))
+        (dolist (buffer (hash-table-keys callbacks))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))
+        (when (buffer-live-p source) (kill-buffer source))))))
 
 (ert-deftest aft-test-current-ids-replace-checkpoint-aliases ()
   (let ((store (agent-shell-fork-tree--new-store "fixture" "/tmp")))
