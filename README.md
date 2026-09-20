@@ -22,7 +22,7 @@ The package uses generic ACP `session/list`, `session/load` and native `session/
   :custom
   (agent-shell-fork-tree-auto-rebuild nil)
   (agent-shell-fork-tree-message-truncation 80)
-  (agent-shell-fork-tree-scan-concurrency 2))
+  (agent-shell-fork-tree-scan-concurrency 8))
 ```
 
 With straight.el managing packages by default, also add `:straight nil` to this declaration.
@@ -70,7 +70,7 @@ Redraws are content-driven, not timer-driven. Progress messages update the heade
 
 Incremental discovery saves the entire cache every `agent-shell-fork-tree-checkpoint-batch-size` history reads (default 16), then flushes pending changes on completion, cancellation or failure. In-memory checkpoints advance on each committed replay. An abrupt Emacs/process crash can lose the unsaved batch; set the batch size to 1 for per-history disk durability. An unchanged scan performs no disk writes. Full rebuilds still save only after success.
 
-History discovery uses up to `agent-shell-fork-tree-scan-concurrency` independent ACP clients (default 2) when the backend advertises both `session/fork` and `session/delete`. Each client reads a private temporary fork, and completed histories are committed in the same priority order as serial discovery even if RPCs finish out of order. Backends without deletable forks remain serial and load original sessions directly.
+History discovery uses up to `agent-shell-fork-tree-scan-concurrency` independent ACP clients (default 8) when the backend advertises both `session/fork` and `session/delete`. Each client reads a private temporary fork, and completed histories are committed in the same priority order as serial discovery even if RPCs finish out of order. Backends without deletable forks remain serial and load original sessions directly.
 
 See [PERFORMANCE.md](PERFORMANCE.md) for reproducible baseline and leave-one-out ablation experiments, raw measurements, and backend/GUI measurement limitations.
 

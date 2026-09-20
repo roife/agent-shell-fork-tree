@@ -15,7 +15,7 @@ and failure flush pending changes regardless of this limit.  One saves after
 every history read."
   :type 'integer :group 'agent-shell-fork-tree)
 
-(defcustom agent-shell-fork-tree-scan-concurrency 2
+(defcustom agent-shell-fork-tree-scan-concurrency 8
   "Maximum number of histories read concurrently during discovery.
 Each concurrent reader owns an independent ACP client.  Concurrency greater
 than one is used only when the agent advertises both session/fork and
