@@ -51,7 +51,6 @@
                        ("f" . agent-shell-fork-tree-fork) ("q" . agent-shell-fork-tree-quit)
                        ("C-c C-k" . agent-shell-fork-tree-cancel)))
       (define-key map (kbd (car binding)) (cdr binding)))
-    (define-key map [mouse-1] #'mouse-set-point)
     map))
 
 (define-derived-mode agent-shell-fork-tree-view-mode special-mode "Fork-Tree"
@@ -199,7 +198,7 @@ other rows are deleted and reinserted; the renderer restores window anchors."
             (insert prefix edge (if (gethash id active) "● " "○ ")
                     (propertize (format "%03d  " id) 'face 'shadow)
                     (replace-regexp-in-string "[\n\r]+" " " (or (agent-shell-fork-tree--node-label node) (agent-shell-fork-tree--node-prompt node))) "\n")
-            (add-text-properties start (point) (list 'fork-tree-node id 'mouse-face 'highlight))
+            (add-text-properties start (point) (list 'fork-tree-node id))
             (puthash (cons id nil) start positions)
             (when (and (null selected-session) (= id selected)) (setq position start))
             (dolist (session (gethash id endpoints))
@@ -208,7 +207,7 @@ other rows are deleted and reinserted; the renderer restores window anchors."
                         "  [" sid "]" (if (equal sid focus) "  current" "")
                         (cond ((agent-shell-fork-tree--session-dirty session) "  needs update")
                               ((not (eq 'full (agent-shell-fork-tree--session-coverage session))) "  partial history") (t "")) "\n")
-                (add-text-properties start (point) (list 'fork-tree-node id 'fork-tree-session sid 'mouse-face 'highlight))
+                (add-text-properties start (point) (list 'fork-tree-node id 'fork-tree-session sid))
                 (puthash (cons nil sid) start positions)
                 (when (equal sid selected-session)
                   (setq position start selected id))))
