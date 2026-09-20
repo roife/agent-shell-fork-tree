@@ -15,9 +15,9 @@
 
 (define-error 'agent-shell-fork-tree-incremental-error "Incremental history mismatch")
 (cl-defstruct (agent-shell-fork-tree--node (:constructor agent-shell-fork-tree--node-create))
-  id parent children prompt answer fingerprint tools label)
+  id parent children children-tail prompt answer fingerprint tools label)
 (cl-defstruct (agent-shell-fork-tree--session (:constructor agent-shell-fork-tree--session-create))
-  id title updated path coverage dirty)
+  id title updated path path-tail coverage dirty)
 (cl-defstruct (agent-shell-fork-tree--store (:constructor agent-shell-fork-tree--store-create))
   key cwd agent nodes sessions by-id by-text (next 1) (revision 0))
 
@@ -81,6 +81,26 @@ Message IDs delimit chunks only within this replay.  Tool data is preview-only."
   "Return STORE node ID."
   (gethash id (agent-shell-fork-tree--store-nodes store)))
 
+(defun agent-shell-fork-tree--append-child (node child)
+  "Append CHILD to NODE's ordered children in constant time."
+  (let* ((children (agent-shell-fork-tree--node-children node))
+         (tail (or (agent-shell-fork-tree--node-children-tail node)
+                   (and children (last children))))
+         (cell (list child)))
+    (if tail (setcdr tail cell)
+      (setf (agent-shell-fork-tree--node-children node) cell))
+    (setf (agent-shell-fork-tree--node-children-tail node) cell)))
+
+(defun agent-shell-fork-tree--path-tail (session)
+  "Return SESSION's final path cons, caching it for append-only updates."
+  (or (agent-shell-fork-tree--session-path-tail session)
+      (when-let* ((path (agent-shell-fork-tree--session-path session)))
+        (setf (agent-shell-fork-tree--session-path-tail session) (last path)))))
+
+(defun agent-shell-fork-tree--last (session)
+  "Return SESSION's final history node, or nil for an empty history."
+  (map-elt (car (agent-shell-fork-tree--path-tail session)) 'node))
+
 (defun agent-shell-fork-tree--attach (store parent turn)
   "Reuse or attach TURN below PARENT in STORE.  Return the node ID."
   (let* ((ids (plist-get turn :ids))
@@ -103,9 +123,7 @@ Message IDs delimit chunks only within this replay.  Tool data is preview-only."
           (puthash (agent-shell-fork-tree--node-id node) node (agent-shell-fork-tree--store-nodes store))
           (puthash key node (agent-shell-fork-tree--store-by-text store))
           (let ((ancestor (agent-shell-fork-tree--node store parent)))
-            (setf (agent-shell-fork-tree--node-children ancestor)
-                  (append (agent-shell-fork-tree--node-children ancestor)
-                          (list (agent-shell-fork-tree--node-id node))))))))
+            (agent-shell-fork-tree--append-child ancestor (agent-shell-fork-tree--node-id node))))))
     (when id-key (puthash id-key node (agent-shell-fork-tree--store-by-id store)))
     (agent-shell-fork-tree--node-id node)))
 
@@ -119,61 +137,84 @@ Message IDs delimit chunks only within this replay.  Tool data is preview-only."
          (first (and current (agent-shell-fork-tree--first current))))
     (seq-filter (lambda (session)
                   (or (equal focus (agent-shell-fork-tree--session-id session))
-                      (and first (equal first (agent-shell-fork-tree--first session)))))
-                (hash-table-values (agent-shell-fork-tree--store-sessions store)))))
+                      (and first
+                           (equal first
+                                  (agent-shell-fork-tree--first session)))))
+                (hash-table-values
+                 (agent-shell-fork-tree--store-sessions store)))))
 
 (defun agent-shell-fork-tree--ingest (store info turns complete focus)
   "Validate cached prefix then append TURNS for INFO to STORE.
 COMPLETE means load finished; FOCUS limits indexing of unrelated sessions
- to their first turn.  Old fingerprints are not recomputed for stable IDs."
+  to their first turn.  Old fingerprints are not recomputed for stable IDs."
   (let* ((id (map-elt info 'sessionId))
          (session (or (gethash id (agent-shell-fork-tree--store-sessions store))
                       (agent-shell-fork-tree--session-create :id id)))
-         (path (copy-tree (agent-shell-fork-tree--session-path session)))
+         (path (agent-shell-fork-tree--session-path session))
          (current (gethash focus (agent-shell-fork-tree--store-sessions store)))
          (focus-first (and current (agent-shell-fork-tree--first current))))
-    (when (and complete (< (length turns) (length path)))
-      (signal 'agent-shell-fork-tree-incremental-error (list (format "%s: history became shorter" id))))
     ;; Validate against saved node references, not by walking the tree or comparing
     ;; other sessions.  A partial replay ending before the checkpoint adds nothing.
-    (cl-loop for record in path for turn in turns for index from 1 do
-             (let* ((node (agent-shell-fork-tree--node store (map-elt record 'node)))
-                    (same-ids (and (plist-get turn :ids) (equal (map-elt record 'ids) (plist-get turn :ids))))
-                    (same-text (and (equal (plist-get turn :prompt) (agent-shell-fork-tree--node-prompt node))
-                                    (equal (plist-get turn :answer) (agent-shell-fork-tree--node-answer node)))))
-               (unless (if same-ids same-text
-                         (equal (agent-shell-fork-tree--node-fingerprint node)
-                                (agent-shell-fork-tree--fingerprint (plist-get turn :prompt) (plist-get turn :answer))))
-                 (signal 'agent-shell-fork-tree-incremental-error
-                         (list (format "%s: cached turn %d changed" id index))))))
-    (cl-loop for record in path for turn in turns do
-             (setf (map-elt record 'ids) (plist-get turn :ids))
-             (when (plist-get turn :ids)
-               (let ((node (agent-shell-fork-tree--node store (map-elt record 'node))))
-                 (puthash (cons (agent-shell-fork-tree--node-parent node) (plist-get turn :ids))
-                          node (agent-shell-fork-tree--store-by-id store)))))
-    (let ((parent (or (map-elt (car (last path)) 'node) 0))
-          (tail (nthcdr (length path) turns)))
-      (when (and (null path) tail)
-        (setq parent (agent-shell-fork-tree--attach store 0 (car tail))
-              path (list (list (cons 'node parent) (cons 'ids (plist-get (pop tail) :ids))))))
-      (if (and (not (equal id focus))
-               (not (equal (map-elt (car path) 'node) focus-first)))
-          (setf (agent-shell-fork-tree--session-coverage session) 'prefix)
-        (let ((end (last path)))
-          (dolist (turn tail)
-            (setq parent (agent-shell-fork-tree--attach store parent turn))
-            (let ((cell (list (list (cons 'node parent) (cons 'ids (plist-get turn :ids))))))
-              (if end (setcdr end cell) (setq path cell))
-              (setq end cell))))
-        (setf (agent-shell-fork-tree--session-coverage session) (if complete 'full 'partial)))
-      (setf (agent-shell-fork-tree--session-path session) path
-            (agent-shell-fork-tree--session-title session) (or (map-elt info 'title) id)
-            (agent-shell-fork-tree--session-dirty session) (not complete))
-      (when complete (setf (agent-shell-fork-tree--session-updated session) (map-elt info 'updatedAt)))
-      (puthash id session (agent-shell-fork-tree--store-sessions store))
-      (cl-incf (agent-shell-fork-tree--store-revision store)))
-    session))
+    (let ((records path) (tail turns) (index 1) aliases)
+      (while (and records tail)
+        (let* ((record (car records)) (turn (car tail))
+               (node (agent-shell-fork-tree--node store (map-elt record 'node)))
+               (ids (plist-get turn :ids))
+               (same-ids (and ids (equal (map-elt record 'ids) ids)))
+               (same-text (and (equal (plist-get turn :prompt) (agent-shell-fork-tree--node-prompt node))
+                               (equal (plist-get turn :answer) (agent-shell-fork-tree--node-answer node)))))
+          (unless (if same-ids same-text
+                    (equal (agent-shell-fork-tree--node-fingerprint node)
+                           (agent-shell-fork-tree--fingerprint (plist-get turn :prompt) (plist-get turn :answer))))
+            (signal 'agent-shell-fork-tree-incremental-error
+                    (list (format "%s: cached turn %d changed" id index))))
+          (unless (equal (map-elt record 'ids) ids)
+            (push (cons record ids) aliases)))
+        (setq records (cdr records) tail (cdr tail))
+        (cl-incf index))
+      (when (and complete records)
+        (signal 'agent-shell-fork-tree-incremental-error (list (format "%s: history became shorter" id))))
+      (let ((parent (or (agent-shell-fork-tree--last session) 0))
+            (end (agent-shell-fork-tree--path-tail session))
+            appended appended-tail)
+        (cl-labels ((append-record (turn)
+                      (setq parent (agent-shell-fork-tree--attach store parent turn))
+                      (let ((cell (list (list (cons 'node parent)
+                                                   (cons 'ids (plist-get turn :ids))))))
+                        (if appended-tail (setcdr appended-tail cell)
+                          (setq appended cell))
+                        (setq appended-tail cell))))
+          (when (and (null path) tail)
+            (append-record (pop tail)))
+          (if (and (not (equal id focus))
+                   (not (equal (map-elt (car (or path appended)) 'node)
+                               focus-first)))
+              (setf (agent-shell-fork-tree--session-coverage session) 'prefix)
+            (dolist (turn tail) (append-record turn))
+            (setf (agent-shell-fork-tree--session-coverage session)
+                  (if complete 'full 'partial))))
+        ;; Link the new suffix only after every attachment succeeded.
+        (when appended
+          (if end (setcdr end appended) (setq path appended))
+          (setq end appended-tail))
+        ;; Commit refreshed aliases only after validation and suffix attachment.
+        (dolist (change aliases)
+          (let* ((record (car change)) (ids (cdr change))
+                 (node (agent-shell-fork-tree--node store (map-elt record 'node))))
+            (setf (map-elt record 'ids) ids)
+            (when ids
+              (puthash (cons (agent-shell-fork-tree--node-parent node) ids)
+                       node (agent-shell-fork-tree--store-by-id store)))))
+        (setf (agent-shell-fork-tree--session-path session) path
+              (agent-shell-fork-tree--session-path-tail session) end
+              (agent-shell-fork-tree--session-title session) (or (map-elt info 'title) id)
+              (agent-shell-fork-tree--session-dirty session) (not complete))
+        (when complete
+          (setf (agent-shell-fork-tree--session-updated session)
+                (map-elt info 'updatedAt)))
+        (puthash id session (agent-shell-fork-tree--store-sessions store))
+        (cl-incf (agent-shell-fork-tree--store-revision store)))
+    session)))
 
 (defun agent-shell-fork-tree--needs-read (store info focus force)
   "Whether INFO needs reading from the backend for STORE and FOCUS."
@@ -254,13 +295,16 @@ COMPLETE means load finished; FOCUS limits indexing of unrelated sessions
         (dolist (node (sort (hash-table-values (agent-shell-fork-tree--store-nodes store)) (lambda (a b) (< (agent-shell-fork-tree--node-id a) (agent-shell-fork-tree--node-id b)))))
           (when-let* ((parent (agent-shell-fork-tree--node-parent node)))
             (let ((ancestor (agent-shell-fork-tree--node store parent)))
-              (setf (agent-shell-fork-tree--node-children ancestor) (append (agent-shell-fork-tree--node-children ancestor) (list (agent-shell-fork-tree--node-id node)))))
+              (agent-shell-fork-tree--append-child ancestor (agent-shell-fork-tree--node-id node)))
             (puthash (cons parent (agent-shell-fork-tree--node-fingerprint node)) node (agent-shell-fork-tree--store-by-text store))))
         (dolist (row (map-elt data 'sessions))
           (let ((session (agent-shell-fork-tree--session-create
                           :id (map-elt row 'id) :title (map-elt row 'title) :updated (map-elt row 'updated)
                           :coverage (intern (map-elt row 'coverage)) :dirty (map-elt row 'dirty) :path (map-elt row 'path))))
-            (puthash (agent-shell-fork-tree--session-id session) session (agent-shell-fork-tree--store-sessions store))
+            (setf (agent-shell-fork-tree--session-path-tail session)
+                  (last (agent-shell-fork-tree--session-path session)))
+            (puthash (agent-shell-fork-tree--session-id session) session
+                     (agent-shell-fork-tree--store-sessions store))
             (dolist (record (agent-shell-fork-tree--session-path session))
               (when (map-elt record 'ids)
                 (let ((node (agent-shell-fork-tree--node store (map-elt record 'node))))

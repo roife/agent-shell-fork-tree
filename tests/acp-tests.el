@@ -50,6 +50,34 @@
        (when (buffer-live-p worker) (kill-buffer worker))
        (kill-buffer source))))
 
+(ert-deftest aft-test-prioritize-sessions-is-stable-and-linearizable ()
+  (let* ((rows '(((sessionId . "other-1")) ((sessionId . "related-2"))
+                 ((sessionId . "main")) ((sessionId . "related-1"))
+                 ((sessionId . "other-2"))))
+         (ordered (agent-shell-fork-tree--prioritize
+                   rows "main" '("related-1" "related-2"))))
+    (should (equal '("main" "related-2" "related-1" "other-1" "other-2")
+                   (mapcar (lambda (row) (map-elt row 'sessionId)) ordered)))))
+
+(ert-deftest aft-test-append-page-preserves-order-and-tail ()
+  (let* ((first (list 'a 'b))
+         (state (agent-shell-fork-tree--append-page nil nil 0 first))
+         (listed (nth 0 state)) (tail (nth 1 state)) (count (nth 2 state)))
+    (setq state (agent-shell-fork-tree--append-page listed tail count (list 'c 'd)))
+    (should (equal '(a b c d) (nth 0 state)))
+    (should (eq (nth 1 state) (last (nth 0 state))))
+    (should (= 4 (nth 2 state)))))
+
+(ert-deftest aft-test-cancel-during-pagination-does-not-append-late-page ()
+  (aft-test-transport
+    (setq rows nil)
+    (start)
+    (funcall cancel)
+    (reply '((sessions . [((sessionId . "late"))])))
+    (should finished)
+    (should (equal '(nil t) result))
+    (should-not (gethash "late" (agent-shell-fork-tree--store-sessions store)))))
+
 (ert-deftest aft-test-cancelled-fork-deletes-only-late-owned-id ()
   (aft-test-transport
     (start)
@@ -225,7 +253,10 @@
           (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t))
                     ((symbol-function 'shell-maker-busy) (lambda () nil))
                     ((symbol-function 'agent-shell-fork-tree-rebuild) (lambda (&rest _) (cl-incf rebuilds)))
-                    ((symbol-function 'run-at-time) (lambda (_time _repeat fn &rest _) (setq timer-callback fn) nil)))
+                    ((symbol-function 'run-at-time)
+                     (lambda (time _repeat fn &rest _)
+                       (when (equal time 0.1) (setq timer-callback fn))
+                       nil)))
             (with-current-buffer source (agent-shell-fork-tree--event '((:event . turn-complete))))
             (should-not timer-callback)
             (setq agent-shell-fork-tree-auto-rebuild t)

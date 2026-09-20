@@ -15,6 +15,27 @@ and failure flush pending changes regardless of this limit.  One saves after
 every history read."
   :type 'integer :group 'agent-shell-fork-tree)
 
+(defun agent-shell-fork-tree--prioritize (sessions focus related)
+  "Return SESSIONS with FOCUS first, then RELATED session IDs.
+Each input row is visited once and ordering within each priority group is kept."
+  (let ((related-ids (make-hash-table :test #'equal)) focused known other)
+    (dolist (id related) (puthash id t related-ids))
+    (dolist (session sessions)
+      (let ((id (map-elt session 'sessionId)))
+        (cond ((equal focus id) (push session focused))
+              ((gethash id related-ids) (push session known))
+              (t (push session other)))))
+    (append (nreverse focused) (nreverse known) (nreverse other))))
+
+(defun agent-shell-fork-tree--append-page (listed tail count rows)
+  "Append ROWS to LISTED after TAIL and return updated list state.
+The result is (LISTED TAIL COUNT); each row and list spine is visited once."
+  (when rows
+    (if tail (setcdr tail rows) (setq listed rows))
+    (setq tail (last rows)
+          count (+ count (length rows))))
+  (list listed tail count))
+
 (defun agent-shell-fork-tree--scan (source store focus full progress finish)
   "Read SOURCE's project into STORE for FOCUS, returning a cancel function.
 FULL bypasses timestamp caches.  PROGRESS receives STORE and a message.
@@ -22,7 +43,7 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
   (let* ((config (map-elt (buffer-local-value 'agent-shell--state source) :agent-config))
          (cwd (agent-shell-fork-tree--store-cwd store))
          (worker (generate-new-buffer " *Fork tree ACP*"))
-         client caps timer listed queue row snapshot reading updates stage
+         client caps timer listed listed-tail (listed-count 0) total queue row snapshot reading updates stage
          finished cancelled dirty (pending-saves 0) (done 0))
     (with-current-buffer worker
       (setq default-directory (buffer-local-value 'default-directory source)
@@ -103,7 +124,7 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
                (stop nil)
              (commit t)
              (setq reading nil updates nil)
-             (publish (format "Read %d/%d · %s" (cl-incf done) (length listed)
+             (publish (format "Read %d/%d · %s" (cl-incf done) total
                               (or (map-elt row 'title) (map-elt row 'sessionId))))
              (release #'next)))
          (read-history (id)
@@ -137,7 +158,7 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
              (close nil))
             (t
              (setq row (pop queue))
-             (publish (format "Reading %d/%d · %s" (1+ done) (length listed)
+             (publish (format "Reading %d/%d · %s" (1+ done) total
                               (or (map-elt row 'title) (map-elt row 'sessionId))))
              (if (and (assq 'fork (map-elt caps 'sessionCapabilities))
                       (assq 'delete (map-elt caps 'sessionCapabilities)))
@@ -151,22 +172,24 @@ FINISH receives STORE, an error string or nil, and whether cancelled."
          (page (cursor)
            (send `((:method . "session/list") (:params (cwd . ,cwd) ,@(when cursor `((cursor . ,cursor)))))
                  (lambda (response)
-                   (setq listed (append listed (append (map-elt response 'sessions) nil)))
-                   (publish (format "Discovering sessions · %d candidates" (length listed)))
                    (cond (cancelled (stop nil))
-                         ((map-elt response 'nextCursor) (page (map-elt response 'nextCursor)))
                          (t
-                          (unless (seq-find (lambda (s) (equal focus (map-elt s 'sessionId))) listed)
-                            (push `((sessionId . ,focus) (title . ,(buffer-name source))) listed))
-                          (setq listed (seq-filter (lambda (s) (or (not (map-elt s 'cwd))
-                                                                   (equal cwd (directory-file-name (map-elt s 'cwd))))) listed))
-                          (let ((related (mapcar #'agent-shell-fork-tree--session-id (agent-shell-fork-tree--related store focus))))
-                            (setq listed (append (seq-filter (lambda (s) (equal focus (map-elt s 'sessionId))) listed)
-                                                 (seq-filter (lambda (s) (and (not (equal focus (map-elt s 'sessionId))) (member (map-elt s 'sessionId) related))) listed)
-                                                 (seq-remove (lambda (s) (member (map-elt s 'sessionId) related))
-                                                             (seq-remove (lambda (s) (equal focus (map-elt s 'sessionId))) listed)))))
-                          (setq queue listed)
-                          (next)))) #'failed))
+                          (let ((rows (append (map-elt response 'sessions) nil)))
+                            (pcase-let ((`(,head ,tail ,count)
+                                         (agent-shell-fork-tree--append-page
+                                          listed listed-tail listed-count rows)))
+                              (setq listed head listed-tail tail listed-count count)))
+                          (publish (format "Discovering sessions · %d candidates" listed-count))
+                          (if-let* ((next-cursor (map-elt response 'nextCursor)))
+                              (page next-cursor)
+                            (unless (seq-find (lambda (s) (equal focus (map-elt s 'sessionId))) listed)
+                              (push `((sessionId . ,focus) (title . ,(buffer-name source))) listed))
+                            (setq listed (seq-filter (lambda (s) (or (not (map-elt s 'cwd))
+                                                                     (equal cwd (directory-file-name (map-elt s 'cwd))))) listed))
+                            (let ((related (mapcar #'agent-shell-fork-tree--session-id (agent-shell-fork-tree--related store focus))))
+                              (setq listed (agent-shell-fork-tree--prioritize listed focus related)))
+                            (setq total (length listed) queue listed)
+                            (next))))) #'failed))
          (ready (&optional _)
            (if cancelled (stop nil) (page nil))))
       (acp-subscribe-to-notifications

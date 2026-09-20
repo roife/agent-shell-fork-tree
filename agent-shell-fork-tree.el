@@ -32,6 +32,8 @@
 (defvar-local agent-shell-fork-tree--preview-key nil)
 (defvar-local agent-shell-fork-tree--rendered-revision -1)
 (defvar-local agent-shell-fork-tree--rendered-state nil)
+(defvar-local agent-shell-fork-tree--positions nil)
+(defvar-local agent-shell-fork-tree--visible-nodes nil)
 (defvar-local agent-shell-fork-tree--session-count 0)
 (defvar-local agent-shell-fork-tree--diff nil)
 (defvar-local agent-shell-fork-tree--loading nil)
@@ -62,11 +64,15 @@
 
 (defun agent-shell-fork-tree--visible ()
   "Return current conversation's visible node IDs as a hash set."
-  (let ((ids (make-hash-table :test #'eql)))
-    (puthash 0 t ids)
-    (dolist (session (agent-shell-fork-tree--related agent-shell-fork-tree--store agent-shell-fork-tree--focus))
-      (dolist (record (agent-shell-fork-tree--session-path session)) (puthash (map-elt record 'node) t ids)))
-    ids))
+  (or (and (= agent-shell-fork-tree--rendered-revision
+              (agent-shell-fork-tree--store-revision agent-shell-fork-tree--store))
+           agent-shell-fork-tree--visible-nodes)
+      (setq agent-shell-fork-tree--visible-nodes
+            (let ((ids (make-hash-table :test #'eql)))
+              (puthash 0 t ids)
+              (dolist (session (agent-shell-fork-tree--related agent-shell-fork-tree--store agent-shell-fork-tree--focus))
+                (dolist (record (agent-shell-fork-tree--session-path session)) (puthash (map-elt record 'node) t ids)))
+              ids))))
 
 (defun agent-shell-fork-tree--update-header ()
   "Update progress without touching tree text or the preview."
@@ -87,7 +93,7 @@ a store are append-only, so the endpoint identifies the displayed path."
                         (agent-shell-fork-tree--session-title session)
                         (agent-shell-fork-tree--session-coverage session)
                         (agent-shell-fork-tree--session-dirty session)
-                        (map-elt (car (last (agent-shell-fork-tree--session-path session))) 'node)))
+                        (agent-shell-fork-tree--last session)))
                 (or sessions
                     (sort (agent-shell-fork-tree--related agent-shell-fork-tree--store agent-shell-fork-tree--focus)
                           (lambda (a b) (string< (agent-shell-fork-tree--session-id a)
@@ -221,6 +227,8 @@ other rows are deleted and reinserted; the renderer restores window anchors."
     (setq agent-shell-fork-tree--selected selected
           agent-shell-fork-tree--selected-session selected-session
           agent-shell-fork-tree--session-count (length sessions)
+          agent-shell-fork-tree--positions positions
+          agent-shell-fork-tree--visible-nodes visible
           agent-shell-fork-tree--rendered-state (agent-shell-fork-tree--view-state sessions)
           agent-shell-fork-tree--rendered-revision (agent-shell-fork-tree--store-revision store))
     (agent-shell-fork-tree--update-header)
@@ -295,12 +303,25 @@ other rows are deleted and reinserted; the renderer restores window anchors."
               "No differences.\n")))
       (mapc #'kill-buffer (list old new result)))))
 
+(defun agent-shell-fork-tree--select (id &optional session)
+  "Select visible node ID, or its SESSION endpoint, without rebuilding the tree."
+  (let ((position (and (= agent-shell-fork-tree--rendered-revision
+                          (agent-shell-fork-tree--store-revision agent-shell-fork-tree--store))
+                       (hash-table-p agent-shell-fork-tree--positions)
+                       (gethash (cons (unless session id) session) agent-shell-fork-tree--positions))))
+    (setq agent-shell-fork-tree--selected id
+          agent-shell-fork-tree--selected-session session)
+    (if position
+        (progn
+          (goto-char position)
+          (when (get-buffer-window (current-buffer)) (agent-shell-fork-tree--preview)))
+      (agent-shell-fork-tree--render))))
+
 (defun agent-shell-fork-tree-parent ()
   "Select the parent turn."
   (interactive)
   (when-let* ((parent (agent-shell-fork-tree--node-parent (agent-shell-fork-tree--node agent-shell-fork-tree--store agent-shell-fork-tree--selected))))
-    (setq agent-shell-fork-tree--selected parent agent-shell-fork-tree--selected-session nil)
-    (agent-shell-fork-tree--render)))
+    (agent-shell-fork-tree--select parent)))
 
 (defun agent-shell-fork-tree-child ()
   "Select the first visible child."
@@ -308,8 +329,7 @@ other rows are deleted and reinserted; the renderer restores window anchors."
   (let ((visible (agent-shell-fork-tree--visible)))
     (when-let* ((child (seq-find (lambda (id) (gethash id visible))
                                 (agent-shell-fork-tree--node-children (agent-shell-fork-tree--node agent-shell-fork-tree--store agent-shell-fork-tree--selected)))))
-      (setq agent-shell-fork-tree--selected child agent-shell-fork-tree--selected-session nil)
-      (agent-shell-fork-tree--render))))
+      (agent-shell-fork-tree--select child))))
 
 (defun agent-shell-fork-tree-find ()
   "Find a turn in the current conversation only."
@@ -319,8 +339,7 @@ other rows are deleted and reinserted; the renderer restores window anchors."
                               (cons (format "%03d %s" id (or (agent-shell-fork-tree--node-label node) (agent-shell-fork-tree--node-prompt node))) id)))
                           (sort (hash-table-keys (agent-shell-fork-tree--visible)) #'<)))
          (choice (completing-read "Find turn: " choices nil t)))
-    (setq agent-shell-fork-tree--selected (cdr (assoc choice choices)) agent-shell-fork-tree--selected-session nil)
-    (agent-shell-fork-tree--render)))
+    (agent-shell-fork-tree--select (cdr (assoc choice choices)))))
 
 (defun agent-shell-fork-tree-label (text)
   "Label the selected turn with TEXT; empty TEXT clears it."
@@ -467,11 +486,15 @@ other rows are deleted and reinserted; the renderer restores window anchors."
                                                (lambda (fork)
                                                  (let* ((id (map-elt fork 'sessionId))
                                                         (attached (lambda (_)
-                                                                    (let ((session (copy-agent-shell-fork-tree--session endpoint)))
+                                                                    (let* ((session (copy-agent-shell-fork-tree--session endpoint))
+                                                                           (path (copy-tree (agent-shell-fork-tree--session-path endpoint))))
                                                                       (setf (agent-shell-fork-tree--session-id session) id
                                                                             (agent-shell-fork-tree--session-title session) (concat (agent-shell-fork-tree--session-title endpoint) " (fork)")
-                                                                            (agent-shell-fork-tree--session-updated session) nil)
-                                                                      (puthash id session (agent-shell-fork-tree--store-sessions store)))
+                                                                            (agent-shell-fork-tree--session-updated session) nil
+                                                                            (agent-shell-fork-tree--session-path session) path
+                                                                            (agent-shell-fork-tree--session-path-tail session) (last path))
+                                                                      (puthash id session
+                                                                               (agent-shell-fork-tree--store-sessions store)))
                                                                     (funcall success fork)))
                                                         (method (cond ((assq 'resume (map-elt caps 'sessionCapabilities)) "session/resume")
                                                                       ((eq t (map-elt caps 'loadSession)) "session/load"))))

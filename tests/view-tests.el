@@ -148,6 +148,18 @@
      (agent-shell-fork-tree--render)
      (should (= tick (buffer-modified-tick))))))
 
+(ert-deftest aft-test-navigation-reuses-rendered-position-index ()
+  (aft-test-view
+   (cl-letf (((symbol-function 'agent-shell-fork-tree--render)
+              (lambda () (ert-fail "Navigation rebuilt an unchanged tree")))
+             ((symbol-function 'agent-shell-fork-tree--preview) #'ignore))
+     (agent-shell-fork-tree-parent)
+     (should (= 49 agent-shell-fork-tree--selected))
+     (should (= 49 (get-text-property (point) 'fork-tree-node)))
+     (agent-shell-fork-tree-child)
+     (should (= 50 agent-shell-fork-tree--selected))
+     (should (= 50 (get-text-property (point) 'fork-tree-node))))))
+
 (ert-deftest aft-test-session-selection-follows-new-endpoint ()
   (aft-test-view
    (setq agent-shell-fork-tree--selected-session "main")

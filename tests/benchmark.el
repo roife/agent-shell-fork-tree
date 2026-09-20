@@ -8,6 +8,7 @@
 ;;; Code:
 (require 'agent-shell-fork-tree)
 (require 'benchmark)
+(require 'macroexp)
 
 (defconst aft-bench-root
   (file-name-directory (directory-file-name (file-name-directory (or load-file-name buffer-file-name)))))
@@ -25,7 +26,10 @@
       (while (and (not found) (< (point) (point-max)))
         (setq form (read (current-buffer)))
         (when (and (eq (car-safe form) 'defun) (eq (cadr form) name))
-          (setq found (eval `(lambda ,(nth 2 form) ,@(nthcdr 3 form)) t))))
+          (setq found
+                (eval (macroexpand-all
+                       `(lambda ,(nth 2 form) ,@(nthcdr 3 form)))
+                      t))))
       (or found (error "Missing baseline function %s" name)))))
 
 (defun aft-bench-fixture (count turns)
